@@ -13,13 +13,34 @@ You can begin a 'gdb' session by using the following command:
         gdb ctarget
         
 Here's some more helpful commands: 
-        break getbuf     set a breakpoint at getbuf
-        run              run program
-        x/10i $pc        next 10 instructions
-        x/10i touch1     next 10 instructions for function touch1
-        si               step in
-        ni               next instruction
-        p/x $rsp         print hex value of stack pointer
+          
+set a breakpoint at getbuf
+
+        break getbuf   
+        
+run program
+
+        run
+        
+next 10 instructions 
+
+        x/10i $pc
+        
+next 10 instructions for function touch1
+
+        x/10i touch1  
+        
+step in
+
+        si
+        
+next instruction
+
+        ni
+        
+print hex value of stack pointer
+
+        p/x $rsp
 
 
 All of these attacks will leverage the 'getbuf' function to create a buffer overflow. 
