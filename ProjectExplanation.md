@@ -16,7 +16,7 @@ You can begin a 'gdb' session by using the following command:
 
         gdb ctarget
         
-Here's some more helpful commands: 
+#### Here's some more helpful commands: 
           
 *set a breakpoint at getbuf*
 
@@ -282,8 +282,44 @@ We should see the following message:
         
 
 ## Phase 3
+From instructions: *Phase 3 also involves a code injection attack, but passing a string as argument. Within `ctarget` there is code for `hexmatch` and `touch3`:
 
+        /* Compare string to hex representation of unsigned value */
+        
+        int hexmatch(unsigned val, char *sval)
+        {
+                char cbuf[110];
+                
+                /* Make position of check string unpredictable */
+                
+                char *s = cbuf + random() % 100;
+                sprintf(s, "%.8x", val);
+                return strncmp(sval, s, 9) == 0;
+         }
+
+        void touch3(char *sval)
+        {
+                vlevel = 3;     /* Part of validation protocol */
+                if (hexmatch(cookie, sval)) {
+                        printf("Touch3!: You called touch3(\"%s\")\n", sval);
+                        validate(3);
+                } else {
+                        printf("Misfire: You called touch3(\"%s\")\n", sval);
+                        fail(3);
+                }
+                exit(0);
+        }
+
+*Your task is to get **`CTARGET` to execute the code for `touch3` rather than returning to `test`. You must make it appear to `touch3` as if you have passed a string representation of your cookie as its argument**.*
+
+*Some Advice*:
+- Include a string representation of the cookie. The string should be eight hexadecimal digits (ordered form most to least significant), without leading `"0x"`
+- A string is represented in C as a sequence of bytes followed by a byte with value 0. Type `man ascii` on any Linux machine to see the byte representations of the characters you need. 
+- Injected code should set register `%rdi` to address of string
+- When functions `hexmatch` and `strncmp` are called, they push data onto the stack, overwriting portions of memory that held the buffer used by `getbuf`. Be careful where you place the string representation of your cookie!
 Our goal here is to pass a string as our argument, rather than an address. We know that the string should consist of eight hexadecimal digits without a leading '0x'. We also know that we need to set the $rdi register with our string representation of the cookie. Finally, we know that the strncmp and hexmatch functions are called, they may overwrite portions of memory that held the buffer used by getbuf. Therefore, we shouldn't place our string argument in the buffer memory.
+
+#### Explanation
 
 First, we need to create a string representation of our cookie. To do so, we can use the following tool: 
 
@@ -293,7 +329,7 @@ Our cookie, $0x2a402507, is converted to the following byte representation:
 
         32 61 34 30 32 35 30 37
 
-Then, we need to figure out how we can store our cookie after the touch3 return address. We will put the cookie here in memory because the strncmp and the hexmatch functions will potentially overwrite the buffer space. 
+Then, we need to figure out how we can store our cookie after the touch3 return address. We will put the cookie here in memory because the `strncmp` and the `hexmatch` functions will potentially overwrite the buffer space. 
 
 We know we want to return to the stack, since that worked for us before. To do that, we can use the following format: 
         
@@ -334,15 +370,61 @@ Using the same commands as before, we pass the solution to our ctarget and get t
         NICE JOB!
         
 # ROP 
+
+*Performing code-injection attacks on program RTARGET is much more difficult than it is for CTARGET,
+because it uses two techniques to thwart such attacks:*
+- It uses randomization so that the stack positions differ from one run to another. This makes it impossible to determine where your injected code will be located.
+- It marks the section of memory holding the stack as nonexecutable, so even if you could set the
+program counter to the start of your injected code, the program would fail with a segmentation fault.
+
+**The strategy with ROP is to identify byte sequences within an existing program that consist of one or more instructions followed by the instruction ret. Such a segment is referred to as a gadget.** 
+
+![image](https://user-images.githubusercontent.com/104695276/176735780-49e2cc34-edb6-4137-9201-9d2655b025c1.png)
+
+*Figure 2 illustrates how the stack can be set up to execute a sequence of n gadgets. In this figure, the stack contains a sequence of gadget addresses. Each gadget consists of a series of instruction bytes, with the final one being 0xc3, encoding the ret instruction. When the program executes a ret instruction starting with this configuration, it will initiate a chain of gadget executions, with the ret instruction at the end of each gadget causing the program to jump to the beginning of the next.*
+
+*A gadget can make use of code corresponding to assembly-language statements generated by the compiler, especially ones at the ends of functions. In practice, there may be some useful gadgets of this form, but not enough to implement many important operations. For example, it is highly unlikely that a compiled function would have popq %rdi as its last instruction before ret. Fortunately, with a byte-oriented instruction set, such as x86-64, a gadget can often be found by extracting patterns from other parts of the instruction byte sequence.*
+
+*For example, one version of rtarget contains code generated for the following C function:*
+        `void setval_210(unsigned *p)
+        {
+                *p = 3347663060U;
+        }`
+        
+*The chances of this function being useful for attacking a system seem pretty slim. But, the disassembled machine code for this function shows an interesting byte sequence:*
+
+        0000000000400f15 <setval_210>:
+        400f15: c7 07 d4 48 89 c7 movl $0xc78948d4,(%rdi)
+        400f1b: c3 retq
+        
+*The byte sequence `48 89 c7` encodes the instruction movq %rax, %rdi. (See Figure 3A for the encodings of useful movq instructions.) This sequence is followed by byte value c3, which encodes the ret instruction. The function starts at address 0x400f15, and the sequence starts on the fourth byte of the function. Thus, this code contains a gadget, having a starting address of 0x400f18, that will copy the 64-bit value in register %rax to register %rdi.*
+
+*Your code for RTARGET contains a number of functions similar to the setval_210 function shown above in a region we refer to as the gadget farm. Your job will be to identify useful gadgets in the gadget farm and use these to perform attacks similar to those you did in Phases 2 and 3.*
+
+Important: *The gadget farm is demarcated by functions start_farm and end_farm in your copy of rtarget. Do not attempt to construct gadgets from other portions of the program code.*
+
+![image](https://user-images.githubusercontent.com/104695276/176735502-0579e865-2e10-4fad-9353-9144e24c94e8.png)
+
+
+
 ## Phase 4
+
+From instructions: *For Phase 4, you will repeat the attack of Phase 2, but do so on program RTARGET using gadgets from your gadget farm. You can construct your solution using gadgets consisting of the available instruction types, and using only the first 8 registers (`%rax - %rdi`).*
+
+*Some Advice*:
+- All the gadgets can be found in `rtarget` between `start_farm` and `mid_farm`.
+- Only need 2 gadgets. 
+- When a gadget uses a `popq` instruction, it will pop data from the stack. Your exploit string will contain a combination of gadget addresses and data. 
+
+#### Explanation
 
 The next two phases use what is called return oriented programming to generate the attack. We will be looking for 'gadgets' that allow us to control the program flow, rather than directly using code injection to overflow the buffer. 
 
-We know that our gadgets will be between <start_farm> and <mid_farm> in our disassembled rtarget file. We know that we will only need 2 gadgets, and that our goal is to recreate the attack in phase 2, using the gadgets rather than code injection. Finally, we know that we will need to use a popq instruction.
+We know that our gadgets will be between `<start_farm>` and `<mid_farm>` in our disassembled rtarget file. We know that we will only need 2 gadgets, and that our goal is to recreate the attack in phase 2, using the gadgets rather than code injection. Finally, we know that we will need to use a popq instruction.
 
 This means that we need to find two gadgets that allow us to call the target 2 function, and pass the cookie value. 
 
-If we know we need to use the popq instruction, we could use the $rdi register. But, the $rdi byte encoding is not available in our set of gadgets. So we will look for a gadget that captures the $rax (return value) register, encoded as byte 58. 
+If we know we need to use the popq instruction, we could use the `%rdi` register. But, the `%rdi` byte encoding is not available in our set of gadgets. So we will look for a gadget that captures the `%rax` (return value) register, encoded as byte 58. 
 
 We notice that the following gadget looks promising: 
 
@@ -350,10 +432,11 @@ We notice that the following gadget looks promising:
         0000000000401672 <addval_283>:
                 401672:	8d 87 eb 58 90 90    	lea    -0x6f6fa715(%rdi),%eax
                 401678:	c3                   	retq   
+                
 We want to see 58 at the end of the byte sequence, because we only need the byte 58. We notice that there are two 90 bytes. These encode a nop, or no operation instruction, and do not execute anything. Therefore, this gadget meets our criteria. 
-We note that the byte 58 is the 4th byte in the byte sequence at address 0x401672, so we need to add 3 bytes to the address in order to call the instruction. Therefore, our address for gadget 1 is 0x401672 + 3, giving us 0x401675. 
+We note that the byte 58 is the 4th byte in the byte sequence at address 0x401672, so we need to add 3 bytes to the address in order to call the instruction. Therefore, our address for gadget 1 is 0x401672 + 3, giving us `0x401675`. 
 
-Our next goal is to find a gadget that allows us to move the return value in to the $rdi register, which is the first argument register. We will need to set this before the touch3 function is called. 
+Our next goal is to find a gadget that allows us to move the return value in to the `%rdi` register, which is the first argument register. We will need to set this before the touch3 function is called. 
 
 Our assembly would look like this: 
                 
@@ -361,7 +444,7 @@ Our assembly would look like this:
         movq %rax, %rdi
         ret
 
-We know from the provided resources that the movq $rax, $rdi retq instructions are encoded as 48 89 c7 c3. When searching through the available gadgets, we find one that will work: 
+We know from the provided resources that the `movq $rax, $rdi retq` instructions are encoded as 48 89 c7 c3. When searching through the available gadgets, we find one that will work: 
 
         0000000000401679 <addval_428>:
                 401679:	        8d 87 48 89 c7 c3    	lea    -0x3c3876b8(%rdi),%eax
@@ -373,9 +456,9 @@ We need the byte sequence starting at 48, so we add two bytes to the address 0x4
         
 Now, we are ready to create our solution. 
 
-We know that we need to overwrite the return address of our getbuf function to be the first in our instructions, popq $rax. We want the return value to be the cookie, so we will store the cookie underneath that instruction. We want the next instruction to be moving the cookie into the argument register, $rdi. Finally, we want to call touch2. 
+We know that we need to overwrite the return address of our `getbuf` function to be the first in our instructions, `popq $rax`. We want the return value to be the cookie, so we will store the cookie underneath that instruction. We want the next instruction to be moving the cookie into the argument register, `$rdi`. Finally, we want to call `touch2`. 
 
-This gives us the following solution:
+**Solution**:
 
         00 00 00 00 00 00 00 00 
         00 00 00 00 00 00 00 00
@@ -397,7 +480,7 @@ We use the same instructions as before, and get the completion message:
         NICE JOB!
         
 ## Phase 5
-This phase is a small portion of the final grade, and by far the most complicated. 
+This phase is a small portion of the final grade, and by far the most complicated. I did not tackle this one, because of the complexity. However, generally speaking, the goal is to call `touch3` with a pointer to a string representation of the cookie. 
 
 
 
