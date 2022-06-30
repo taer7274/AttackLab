@@ -245,7 +245,9 @@ In our solution, this will be the first line.
 
 Now that we have figured out how to capture the movement of the cookie value to the `%rdi` register, we now want to figure out how to return to the stack, rather than going to the return address of getbuf. 
 
-To do so, we need to figure out the address of the stack pointer. We can do that by stepping through the ctarget program, and using the following command to investigate the address of the stack pointer:
+To do so, we need to figure out the address of the stack pointer. We don't want the address of the stack pointer before we pass in a string, however; we want the address after passing in a string. We can ensure we get the correct %rsp address by passing in a string to `ctarget`, then printing the value of the stack pointer. We can do that by stepping through the ctarget program, and using the following command to investigate the address of the stack pointer:
+
+        String to enter: 12345
 
         x/d $rsp
       
