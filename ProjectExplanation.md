@@ -1,6 +1,10 @@
 ## Overview
 
-The goal of this project is to get more familiar with code injection and return-oriented programming techniques. 
+The goal of this project is to get more familiar with code injection and return-oriented programming techniques.
+
+To get started, save the file in a protected directory. Then use the command: 
+
+        tar -xvf targetk.tar
 
 To investigate both of the targets, make sure to disassemble them. You can do so using the following commands: 
 
@@ -43,7 +47,14 @@ Here's some more helpful commands:
         p/x $rsp
 
 
-All of these attacks will leverage the 'getbuf' function to create a buffer overflow. 
+Both CTARGET and RTARGET read strings from standard input. All of these attacks will leverage the `getbuf` function to create a buffer overflow.
+
+        unsigned getbuf()
+        {
+                char buf[BUFFER_SIZE];
+                Gets(buf);
+                return 1;
+        }
 
 ##### getbuf
 
@@ -54,15 +65,57 @@ All of these attacks will leverage the 'getbuf' function to create a buffer over
       401480:	b8 01 00 00 00       	mov    $0x1,%eax
       401485:	48 83 c4 18          	add    $0x18,%rsp
       401489:	c3                   	retq   
-  
+
 We can see in the first line of 'getbuf' that we subtract $0x18, or 24 bytes, from the stack, creating a buffer of size 24. Therefore, in order to overflow the buffer, we will need to create strings that are larger than size 24. 
 
-## Phase 1
-In the first phase, our goal is to overflow the buffer, rewriting the return address of the getbuf function to be the address of the touch1 function. 
+#### Important points about input strings 
+- The input (or exploit) string cannot contain '0x0a' within the middle of the string, since this is the newline character. 
+- The program `HEX2RAW` requires two-digit hex values separated by one or more white spaces. 
+- Little-endian ordering! 
 
+### Point Breakdown 
+
+        Phase 1         CTARGET         Level 1         CI      `touch1`        10 pts
+        Phase 2         CTARGET         Level 2         CI      `touch2`        25 pts
+        Phase 3         CTARGET         Level 3         CI      `touch3`        25 pts
+        Phase 4         RTARGET         Level 2         ROP     `touch2`        35 pts
+        Phase 5         RTARGET         Level 3         ROP     `touch3`        5  pts
+
+### Phases 1 - 3
+The first three phases attack `CTARGET`. The stack positions are consistent, so the data on the stack can be treated as executable code.
+
+
+## Phase 1
+From the instructions: *For Phase 1, you will not inject new code. Instead, your exploit strings will redirect the program to execute an existing procedure. Function `getbuf` is called within CTARGET by a function `test`:*
+        
+        void test()
+        {
+                int val;
+                val = getbuf();
+                printf("No exploit. Getbuf returned 0x%x/n", val);
+        }
+        
+*When `getbuf` executes its return statement (line 5 of `getbuf`), the program ordinarily resumes execution within function `test` (at line 5 of this function). We want to change this behavior. Within the file CTARGET, there is code for a function `target1`:*
+
+        void touch1()
+        {
+                vlevel = 1;     /*Part of validation protocol*/
+                printf("Touch1!: You called touch1()/n");
+                validate(1);
+                exit(0);
+        }
+        
+*Your task is to get **CTARGET to execute the code for `touch1` when `getbuf` executes its return statement, rather than returning to `test`**. *
+
+*Some advice:*
+- All the information can be determined by examining `CTARGET`. 
+- Position a byte representation of the starting address for `touch1` so that the `ret` instruction at the end of the code for `getbuf` will transfer control to `touch1`
+In the first phase, our goal is to overflow the buffer, rewriting the return address of the `getbuf` function to be the address of the `touch1` function. 
+
+##### Explanation 
 So in order for us to overwrite the return address, we need to fill the buffer completely, then pass in the address of the touch1 function.
         
-Let's look at the touch1 function to see what our address is: 
+Let's look at the `touch1` function to see what our address is: 
 
         000000000040148a <touch1>:
           40148a:	48 83 ec 08          	sub    $0x8,%rsp
@@ -77,7 +130,9 @@ Let's look at the touch1 function to see what our address is:
           
 We can see that in hexadecimal, our address is 0x40148a. 
 
-This is what we want to put where the return address for getbuf is. 
+This is what we want to put where the return address for `getbuf` is. 
+
+##### Solution
 
 We can accomplish that by creating the following text file: 
 
@@ -109,10 +164,29 @@ We should see the following message if we've done our work correctly:
         
 Note that if you have a different file, you may have a different value for cookie, and will likely have different addresses and buffer sizes. 
 
-
-
 ## Phase 2
+From instructions: *Phase 2 involves injecting a small amount of code as part of your exploit string. Within `ctarget` there is `touch2`
 
+        void touch2(unsigned val)
+        {
+                vlevel = 2;     /* Part of validation protocol */
+                if (val == cookie) {
+                        printf("Touch2!: You called touch2(0x%.8x)\n", val);
+                        validate(2);
+                } else {
+                        printf("Misfire: You called touch2(0x%.8x)\n", val);
+                        fail(2);
+                }
+                exit(0);
+         }
+*Your task is to get `ctarget` to execute the code for 'touch2' rather than testing to `test`. In this case, however, **you must make it appear to `touch2` as if you passed your cookie as its argument**.*
+
+*Some Advice*:
+- Position a byte representation of the address of your injected code in such a way that the `ret` instruction at the end of the code for `getbuf` will transfer control to it. 
+- First argument is in `%rdi`
+- Injected code should set the register to your cookie, then use a `ret` instruction to transfer control to the first instruction in `touch2`. 
+
+#### Explanation:
 The second phase uses a code injection approach. This time, we're not changing the return address of a function, we're actually going to run some code. 
 
 So our goal is to set the %rdi register (first argument) to our cookie value, then transfer control to the first instruction in the touch2 function. 
@@ -165,19 +239,19 @@ We can see that we get the following hex representation for our assembly code:
         0:   48 c7 c7 07 25 40 2a    mov    $0x2a402507,%rdi
         7:   c3                      retq   
         
-The string that will capture this command will be the mov and ret command on the same line: '48 c7 c7 07 25 40 2a c3'. 
+The string that will capture this command will be the mov and ret command on the same line: `48 c7 c7 07 25 40 2a c3`. 
 
 In our solution, this will be the first line. 
 
-Now that we have figured out how to capture the movement of the cookie value to the %rdi register, we now want to figure out how to return to the stack, rather than going to the return address of getbuf. 
+Now that we have figured out how to capture the movement of the cookie value to the `%rdi` register, we now want to figure out how to return to the stack, rather than going to the return address of getbuf. 
 
 To do so, we need to figure out the address of the stack pointer. We can do that by stepping through the ctarget program, and using the following command to investigate the address of the stack pointer:
 
         x/d $rsp
       
-We do this in our program, and we get the following address for $rsp: 0x5561b8e8
+We do this in our program, and we get the following address for `$rsp: 0x5561b8e8`
 
-Finally, we need the address of our touch2 function, so once the function returns to the stack to execute the line we input that sets the cookie value, we go to the touch2 function. 
+Finally, we need the address of our `touch2` function, so once the function returns to the stack to execute the line we input that sets the cookie value, we go to the `touch2` function. 
 
 Our solution will look like this:
 
